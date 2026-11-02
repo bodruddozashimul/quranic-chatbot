@@ -1,0 +1,100 @@
+# Quran RAG — demo stack for an 8 GB Windows 11 machine.
+#
+# The important departure from the original compose file: Ollama is NOT a
+# container here. On Windows, Docker runs inside a WSL2 virtual machine that
+# gets a fixed slice of RAM. Putting a multi-gigabyte model inside that slice
+# means the model, ChromaDB, the backend and Streamlit all compete for the same
+# few gigabytes, and the model loses -- it pages to disk and generation slows to
+# a crawl or the container is OOM-killed.
+#
+# Running Ollama natively on Windows lets it allocate from the full 8 GB
+# directly, and the containers reach it over host.docker.internal. The three
+# containers below then need only about 1.5 GB between them.
+#
+# If you would rather containerize Ollama anyway, start the stack with
+#   docker compose --profile bundled-ollama up
+# and set OLLAMA_BASE_URL=http://ollama:11434 in .env. Expect it to be slower.
+
+services:
+
+  # ── 1. ChromaDB vector store ──────────────────────────────────────
+  chromadb:
+    image: chromadb/chroma:0.5.23
+    container_name: quran_chromadb
+    ports:
+      - "8002:8000"
+    volumes:
+      - ./volumes/chromadb:/chroma/chroma
+    environment:
+      - IS_PERSISTENT=TRUE
+      - ANONYMIZED_TELEMETRY=FALSE
+    mem_limit: 1g
+    restart: unless-stopped
+
+  # ── 2. Dataset build + ingestion (runs once, then exits) ──────────
+  # Downloads the three editions, embeds 6236 ayahs, loads ChromaDB.
+  # Waits for ChromaDB internally, so no healthcheck condition is needed.
+  ingest:
+    build:
+      context: ./data
+    container_name: quran_ingest
+    environment:
+      - CHROMA_HOST=chromadb
+      - CHROMA_PORT=8000
+      - DATASET_PATH=/app/data/quran_full.json
+      - EMBED_THREADS=4
+    volumes:
+      - ./volumes/data:/app/data
+    depends_on:
+      - chromadb
+    mem_limit: 2g
+    restart: "no"
+
+  # ── 3. FastAPI backend ────────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+    container_name: quran_backend
+    ports:
+      - "8000:8000"
+    env_file: .env
+    environment:
+      - CHROMA_HOST=chromadb
+      - CHROMA_PORT=8000
+    extra_hosts:
+      # Lets the container reach Ollama running on Windows itself.
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - chromadb
+    mem_limit: 1500m
+    restart: unless-stopped
+
+  # ── 4. Streamlit frontend ─────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+    container_name: quran_frontend
+    ports:
+      - "8501:8501"
+    environment:
+      - API_URL=http://backend:8000
+    depends_on:
+      - backend
+    mem_limit: 700m
+    restart: unless-stopped
+
+  # ── Optional: containerized Ollama (not recommended at 8 GB) ──────
+  ollama:
+    image: ollama/ollama:latest
+    container_name: quran_ollama
+    profiles: ["bundled-ollama"]
+    ports:
+      - "11434:11434"
+    volumes:
+      - ./volumes/ollama:/root/.ollama
+    mem_limit: 4g
+    restart: unless-stopped
+
+networks:
+  default:
+    name: quran_network

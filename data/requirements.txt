@@ -1,0 +1,4 @@
+chromadb-client==0.5.23
+fastembed==0.3.6
+onnxruntime==1.18.1
+numpy==1.26.4
